@@ -10,16 +10,23 @@ export default {
       else if (url.pathname === '/logs'     && request.method === 'GET')  res = await handleLogs(request, env);
       else if (url.pathname === '/download' && request.method === 'GET')  res = await handleDownload(request, env);
       else if (url.pathname === '/cancel'   && request.method === 'POST') res = await handleCancel(request, env);
+      else if (url.pathname === '/debug-env' && request.method === 'GET') res = await handleDebugEnv(request, env);
       else return env.ASSETS.fetch(request);
       return cors(res, env);
     } catch (e) {
+      if (env.ASSETS) {
+        try {
+          const url = new URL(request.url);
+          if (!['/build','/status','/logs','/download','/cancel'].includes(url.pathname)) return cors(await env.ASSETS.fetch(request), env);
+        } catch {}
+      }
       return cors(json({ error: e.message }, 500), env);
     }
   }
 };
 
 async function handleBuild(request, env) {
-  const { app_url, app_name, package_name, version_name, icon_url, no_screenshot } = await request.json();
+  const { app_url, app_name, package_name, version_name, icon_url } = await request.json();
   const buildId = Date.now().toString(36) + Math.random().toString(36).slice(2,6);
   if (!app_url || !app_name || !package_name || !version_name)
     return json({ error: 'Missing required fields' }, 400);
@@ -39,7 +46,7 @@ async function handleBuild(request, env) {
     `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/build.yml/dispatches`,
     { method: 'POST', body: JSON.stringify({
         ref: 'main',
-        inputs: { app_url, app_name, package_name, version_name, icon_url: icon_url || 'https://apk.091224.xyz/logo.jpg', no_screenshot: no_screenshot||'false', build_id: buildId }
+        inputs: { app_url, app_name, package_name, version_name, icon_url: icon_url || '' }
     })}
   );
   if (r.status !== 204) return json({ error: 'Trigger failed', detail: await r.text() }, 500);
@@ -194,34 +201,34 @@ async function handleDownload(request, env) {
   const artifactId = params.get('artifact_id');
   if (!runId) return json({ error: 'Missing run_id' }, 400);
 
-  let resolvedId = artifactId;
-  let artifactName = 'apk';
-
-  if (!resolvedId) {
-    // 没有指定 artifact_id，查列表取第一个
-    const arts = await (await gh(env,
-      `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/runs/${runId}/artifacts`
-    )).json();
-    const a = arts.artifacts?.[0];
-    if (!a) return json({ error: 'Artifact not found' }, 404);
-    resolvedId = a.id;
-    artifactName = a.name;
+  const artsRes = await (await gh(env,
+    `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/runs/${runId}/artifacts`
+  )).json();
+  const artifacts = (artsRes.artifacts || []).filter(a => !a.expired);
+  if (!artifacts.length) {
+    return json({ error: 'Artifact not found', run_id: runId, artifact_id: artifactId || null, artifacts: [] }, 404);
   }
 
-  // GitHub artifact 下载：先拿重定向 URL，再不带 Auth 头去 S3 下载
+  let picked = null;
+  if (artifactId) picked = artifacts.find(a => String(a.id) === String(artifactId));
+  if (!picked) picked = artifacts[0];
+
+  const resolvedId = picked.id;
+  const artifactName = picked.name || 'apk';
+
   const dlRedirect = await gh(env,
     `/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/artifacts/${resolvedId}/zip`,
     { redirect: 'manual' }
   );
-  // 302 重定向到 S3，不能带 Authorization 头
   const s3Url = dlRedirect.headers.get('location');
-  if (!s3Url) return json({ error: 'Download redirect failed', status: dlRedirect.status }, 502);
+  if (!s3Url) {
+    return json({ error: 'Download redirect failed', status: dlRedirect.status, run_id: runId, artifact_id: resolvedId }, 502);
+  }
 
   const dl = await fetch(s3Url);
-  if (!dl.ok) return json({ error: 'Download failed from S3', status: dl.status }, 502);
+  if (!dl.ok) return json({ error: 'Download failed from S3', status: dl.status, run_id: runId, artifact_id: resolvedId }, 502);
   const zipBuf = await dl.arrayBuffer();
 
-  // 尝试解压，直接返回 .apk
   try {
     const apk = await extractApkFromZip(zipBuf);
     if (apk) {
@@ -237,7 +244,6 @@ async function handleDownload(request, env) {
     }
   } catch (_) {}
 
-  // 解压失败，降级返回原始 ZIP
   return new Response(zipBuf, {
     headers: {
       'Content-Type': 'application/zip',
@@ -247,7 +253,7 @@ async function handleDownload(request, env) {
   });
 }
 
-// 解析 ZIP Local File Headers，提取第一个 .apk 文件字节（支持 stored + deflate）
+// 解析 ZIP Local File Headers// 解析 ZIP Local File Headers，提取第一个 .apk 文件字节（支持 stored + deflate）
 async function extractApkFromZip(buf) {
   const view  = new DataView(buf);
   const bytes = new Uint8Array(buf);
@@ -315,4 +321,19 @@ function cors(res, env) {
   h.set('Access-Control-Allow-Headers', 'Content-Type');
   return new Response(res.body, { status: res.status, headers: h });
 }
-// force-redeploy: 1777597096
+// force-redeploy: pages-advanced-mode-fix-20260502-1137
+
+
+async function handleDebugEnv(request, env) {
+  const mask = (v) => !v ? null : (v.length <= 10 ? '*'.repeat(v.length) : `${v.slice(0,4)}***${v.slice(-4)}`);
+  return json({
+    ok: true,
+    env: {
+      GITHUB_OWNER: env.GITHUB_OWNER || null,
+      GITHUB_REPO: env.GITHUB_REPO || null,
+      GITHUB_TOKEN_present: !!env.GITHUB_TOKEN,
+      GITHUB_TOKEN_masked: mask(env.GITHUB_TOKEN || ''),
+      GITHUB_TOKEN_length: env.GITHUB_TOKEN ? env.GITHUB_TOKEN.length : 0,
+    }
+  });
+}
