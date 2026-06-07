@@ -1,33 +1,47 @@
-import urllib.request, os, io, sys
+import urllib.request, os, io
 from PIL import Image, ImageDraw
 
 url = os.environ.get('ICON_URL', '').strip()
+FALLBACK = 'logo.jpg'
 
+def load_fallback():
+    if os.path.exists(FALLBACK):
+        try:
+            tmp = Image.open(FALLBACK)
+            tmp.load()
+            print(f'Using fallback {FALLBACK}: {tmp.format} {tmp.size}')
+            return tmp.convert('RGBA')
+        except Exception as e:
+            print(f'Fallback {FALLBACK} failed: {e}')
+    print('No fallback available, keeping default Android launcher icon.')
+    return None
+
+img = None
 if not url:
-    print('No icon URL provided, keeping default Android launcher icon.')
+    print('No icon URL provided, trying fallback logo.jpg.')
+    img = load_fallback()
 else:
-    img = None
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=15) as r:
             raw = r.read()
-        img = Image.open(io.BytesIO(raw)).convert('RGBA')
-        print(f'Image OK: {img.format} {img.size}')
+        tmp = Image.open(io.BytesIO(raw))
+        tmp.load()
+        img = tmp.convert('RGBA')
+        print(f'Image OK: {tmp.format} {tmp.size}')
     except Exception as e:
-        # fix(bug#4): 下载失败时 exit 1，让 CI 明确报错而不是静默跳过
-        print(f'Download/open failed: {e}')
-        sys.exit(1)
+        print(f'Download/open failed ({e}), trying fallback logo.jpg.')
+        img = load_fallback()
 
-    if img is not None:
-        for density, size in [('mdpi',48),('hdpi',72),('xhdpi',96),('xxhdpi',144),('xxxhdpi',192)]:
-            out = img.resize((size,size), Image.LANCZOS)
-            base = f'app/src/main/res/mipmap-{density}'
-            os.makedirs(base, exist_ok=True)
-            out.save(f'{base}/ic_launcher.png')
-            # fix(bug#9): 椭圆终点用 size-1，避免 Pillow exclusive 端点导致 1px 锯齿
-            mask = Image.new('RGBA',(size,size),(0,0,0,0))
-            ImageDraw.Draw(mask).ellipse((0,0,size-1,size-1),fill=(255,255,255,255))
-            result = Image.new('RGBA',(size,size),(0,0,0,0))
-            result.paste(out, mask=mask)
-            result.save(f'{base}/ic_launcher_round.png')
-        print('Icon ALL OK')
+if img is not None:
+    for density, size in [('mdpi',48),('hdpi',72),('xhdpi',96),('xxhdpi',144),('xxxhdpi',192)]:
+        out = img.resize((size,size), Image.LANCZOS)
+        base = f'app/src/main/res/mipmap-{density}'
+        os.makedirs(base, exist_ok=True)
+        out.save(f'{base}/ic_launcher.png', format='PNG')
+        mask = Image.new('RGBA',(size,size),(0,0,0,0))
+        ImageDraw.Draw(mask).ellipse((0,0,size-1,size-1),fill=(255,255,255,255))
+        result = Image.new('RGBA',(size,size),(0,0,0,0))
+        result.paste(out, mask=mask)
+        result.save(f'{base}/ic_launcher_round.png', format='PNG')
+    print('Icon ALL OK')
